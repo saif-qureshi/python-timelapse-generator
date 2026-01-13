@@ -290,9 +290,9 @@ class TimelapseGenerator:
         
         try:
             self._ffmpeg_process = subprocess.Popen(
-                ffmpeg_cmd, 
+                ffmpeg_cmd,
                 stdin=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
                 bufsize=Config.FFMPEG_BUFFER_SIZE
             )
         except FileNotFoundError:
@@ -312,8 +312,7 @@ class TimelapseGenerator:
                     logger.info(f"Processing image {idx + 1}/{len(self.images)}")
 
                 if self._ffmpeg_process.poll() is not None:
-                    stderr = self._ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
-                    raise RuntimeError(f"FFmpeg process died: {stderr}")
+                    raise RuntimeError(f"FFmpeg process died with code {self._ffmpeg_process.returncode}")
 
                 try:
                     img = cv2.imread(img_path)
@@ -346,8 +345,7 @@ class TimelapseGenerator:
                     del img, img_bytes
 
                 except BrokenPipeError:
-                    stderr = self._ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
-                    raise RuntimeError(f"FFmpeg pipe broken: {stderr}")
+                    raise RuntimeError("FFmpeg pipe broken - process may have exited")
                 except Exception as e:
                     logger.warning(f"Skipping image {img_path}: {e}")
         
@@ -364,8 +362,7 @@ class TimelapseGenerator:
                     raise RuntimeError("FFmpeg process timed out")
                 
                 if self._ffmpeg_process.returncode != 0:
-                    stderr = self._ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
-                    raise RuntimeError(f"FFmpeg failed with code {self._ffmpeg_process.returncode}: {stderr}")
+                    raise RuntimeError(f"FFmpeg failed with code {self._ffmpeg_process.returncode}")
         
         logger.info(f"Video created: {self.temp_video_path}")
         self._ffmpeg_process = None
