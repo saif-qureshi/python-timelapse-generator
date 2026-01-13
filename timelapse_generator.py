@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Tuple, Optional, List
 import glob
 from moviepy import VideoFileClip, AudioFileClip
-from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
 import subprocess
 import shlex
@@ -32,48 +32,6 @@ from utils import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
-def _process_single_image(args):
-    """
-    Process a single image - module-level function for ProcessPoolExecutor.
-    Must be at module level to be picklable.
-    """
-    img_path, width, height, effects_config, overlay_configs, logo_path, watermark_path, watermark_size, watermark_transparency = args
-
-    try:
-        # Import inside function for subprocess isolation
-        import cv2
-        from image_editor import ImageEditor
-
-        img = cv2.imread(img_path)
-        if img is None:
-            return None
-
-        if img.shape[:2] != (height, width):
-            interpolation = cv2.INTER_AREA if img.shape[0] > height else cv2.INTER_LANCZOS4
-            img = cv2.resize(img, (width, height), interpolation=interpolation)
-
-        editor = ImageEditor()
-        img = editor.apply_effects(img, **effects_config)
-
-        if overlay_configs.get('show_date'):
-            img = editor.add_datetime(img, img_path)
-
-        if overlay_configs.get('text'):
-            img = editor.add_text(img, overlay_configs['text'])
-
-        if logo_path:
-            logo = editor.prepare_logo(logo_path)
-            img = editor.add_logo(img, logo)
-
-        if watermark_path:
-            watermark = editor.prepare_watermark(watermark_path, watermark_size, watermark_transparency)
-            img = editor.add_watermark(img, watermark, watermark_transparency)
-
-        return img
-    except Exception as e:
-        return None
 
 
 @dataclass
@@ -194,47 +152,49 @@ class TimelapseGenerator:
                             watermark_path: str = None,
                             watermark_size: tuple = None,
                             watermark_transparency: float = 0.3) -> List[np.ndarray]:
-        """Process a batch of images in parallel using ProcessPoolExecutor."""
+        """
+        Process a batch of images sequentially to avoid memory issues.
+        Returns ONE processed image per input (no duplication - that happens when writing to FFmpeg).
+        """
         processed = []
 
-        total_frames = int(duration * self.fps)
-        frames_per_image = max(1, total_frames // len(self.images))
-
-        # Prepare args for each image (must be picklable for ProcessPoolExecutor)
-        task_args = [
-            (img_path, config.width, config.height, effects_config, overlay_configs,
-             logo_path, watermark_path, watermark_size, watermark_transparency)
-            for img_path in img_paths
-        ]
-
-        # Use ProcessPoolExecutor - processes CAN be killed unlike threads
-        with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
-            futures = {executor.submit(_process_single_image, args): args[0]
-                      for args in task_args}
-
-            # Timeout for entire batch - 30 seconds per image
-            batch_timeout = Config.IMAGE_PROCESS_TIMEOUT * len(img_paths)
-
+        # Process images one at a time to control memory usage
+        for img_path in img_paths:
             try:
-                for future in as_completed(futures, timeout=batch_timeout):
-                    img_path = futures[future]
-                    try:
-                        result = future.result(timeout=5)
-                        if result is not None:
-                            for _ in range(frames_per_image):
-                                processed.append(result)
-                    except Exception as e:
-                        logger.warning(f"Error processing image {img_path}: {e}, skipping")
-            except TimeoutError:
-                # Batch timed out - with ProcessPoolExecutor we can actually kill workers
-                not_done = [f for f in futures if not f.done()]
-                for f in not_done:
-                    f.cancel()
-                    img_path = futures[f]
-                    logger.warning(f"Timeout - killed process for image: {img_path}")
-                logger.warning(f"Batch timed out, {len(not_done)} images skipped")
-                # Force shutdown to kill hanging processes
-                executor.shutdown(wait=False, cancel_futures=True)
+                img = cv2.imread(img_path)
+                if img is None:
+                    logger.warning(f"Could not read image: {img_path}, skipping")
+                    continue
+
+                # Resize if needed
+                if img.shape[:2] != (config.height, config.width):
+                    interpolation = cv2.INTER_AREA if img.shape[0] > config.height else cv2.INTER_LANCZOS4
+                    img = cv2.resize(img, (config.width, config.height), interpolation=interpolation)
+
+                # Apply effects
+                img = self.image_editor.apply_effects(img, **effects_config)
+
+                # Apply overlays
+                if overlay_configs.get('show_date'):
+                    img = self.image_editor.add_datetime(img, img_path)
+
+                if overlay_configs.get('text'):
+                    img = self.image_editor.add_text(img, overlay_configs['text'])
+
+                if logo_path:
+                    logo = self.image_editor.prepare_logo(logo_path)
+                    if logo is not None:
+                        img = self.image_editor.add_logo(img, logo)
+
+                if watermark_path:
+                    watermark = self.image_editor.prepare_watermark(watermark_path, watermark_size, watermark_transparency)
+                    if watermark is not None:
+                        img = self.image_editor.add_watermark(img, watermark, watermark_transparency)
+
+                processed.append(img)
+
+            except Exception as e:
+                logger.warning(f"Error processing image {img_path}: {e}, skipping")
 
         return processed
     
@@ -341,20 +301,24 @@ class TimelapseGenerator:
             raise RuntimeError(f"Failed to start FFmpeg: {e}")
         
         total_batches = (len(self.images) + batch_size - 1) // batch_size
-        
+
+        # Calculate frames per image for duration control
+        total_frames = int(duration * self.fps)
+        frames_per_image = max(1, total_frames // len(self.images))
+
         try:
             for batch_idx in range(total_batches):
                 start_idx = batch_idx * batch_size
                 end_idx = min(start_idx + batch_size, len(self.images))
                 batch_paths = self.images[start_idx:end_idx]
-                
+
                 logger.info(f"Processing batch {batch_idx + 1}/{total_batches} "
                            f"({end_idx}/{len(self.images)} images)")
-                
+
                 if self._ffmpeg_process.poll() is not None:
                     stderr = self._ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
                     raise RuntimeError(f"FFmpeg process died: {stderr}")
-                
+
                 processed_batch = self._process_image_batch(
                     batch_paths, config, duration, overlay_configs, effects_config,
                     logo_path=valid_logo_path,
@@ -362,14 +326,18 @@ class TimelapseGenerator:
                     watermark_size=watermark_size,
                     watermark_transparency=watermark_transparency
                 )
-                
+
+                # Write each image multiple times for frame duplication (controls video duration)
+                # This is more memory efficient than duplicating in _process_image_batch
                 for img in processed_batch:
+                    img_bytes = img.tobytes()
                     try:
-                        self._ffmpeg_process.stdin.write(img.tobytes())
+                        for _ in range(frames_per_image):
+                            self._ffmpeg_process.stdin.write(img_bytes)
                     except BrokenPipeError:
                         stderr = self._ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
                         raise RuntimeError(f"FFmpeg pipe broken: {stderr}")
-                
+
                 del processed_batch
         
         finally:
