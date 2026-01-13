@@ -8,6 +8,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import os
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Tuple
@@ -25,7 +26,7 @@ from utils import (
     check_disk_space, ValidationError, SecurityError
 )
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(levelname)s:%(name)s:%(message)s')
 logger = logging.getLogger(__name__)
 
 class PhotoExporter:

@@ -8,7 +8,7 @@ from photo_exporter import PhotoExporter
 from timelapse_generator import TimelapseGenerator
 from utils import ValidationError, SecurityError
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(levelname)s:%(name)s:%(message)s')
 logger = logging.getLogger(__name__)
 
 

@@ -15,7 +15,7 @@ import tempfile
 import shutil
 import logging
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, stream=sys.stdout, format='%(levelname)s:%(name)s:%(message)s')
 logger = logging.getLogger(__name__)
 
 def filter_photos_by_timestamp(photo_dir, start_date, end_date, start_hour, end_hour):
