@@ -307,38 +307,49 @@ class TimelapseGenerator:
         frames_per_image = max(1, total_frames // len(self.images))
 
         try:
-            for batch_idx in range(total_batches):
-                start_idx = batch_idx * batch_size
-                end_idx = min(start_idx + batch_size, len(self.images))
-                batch_paths = self.images[start_idx:end_idx]
-
-                logger.info(f"Processing batch {batch_idx + 1}/{total_batches} "
-                           f"({end_idx}/{len(self.images)} images)")
+            for idx, img_path in enumerate(self.images):
+                if idx % 100 == 0:
+                    logger.info(f"Processing image {idx + 1}/{len(self.images)}")
 
                 if self._ffmpeg_process.poll() is not None:
                     stderr = self._ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
                     raise RuntimeError(f"FFmpeg process died: {stderr}")
 
-                processed_batch = self._process_image_batch(
-                    batch_paths, config, duration, overlay_configs, effects_config,
-                    logo_path=valid_logo_path,
-                    watermark_path=valid_watermark_path,
-                    watermark_size=watermark_size,
-                    watermark_transparency=watermark_transparency
-                )
+                try:
+                    img = cv2.imread(img_path)
+                    if img is None:
+                        continue
 
-                # Write each image multiple times for frame duplication (controls video duration)
-                # This is more memory efficient than duplicating in _process_image_batch
-                for img in processed_batch:
+                    if img.shape[:2] != (config.height, config.width):
+                        interpolation = cv2.INTER_AREA if img.shape[0] > config.height else cv2.INTER_LANCZOS4
+                        img = cv2.resize(img, (config.width, config.height), interpolation=interpolation)
+
+                    img = self.image_editor.apply_effects(img, **effects_config)
+
+                    if overlay_configs.get('show_date'):
+                        img = self.image_editor.add_datetime(img, img_path)
+                    if overlay_configs.get('text'):
+                        img = self.image_editor.add_text(img, overlay_configs['text'])
+                    if valid_logo_path:
+                        logo = self.image_editor.prepare_logo(valid_logo_path)
+                        if logo is not None:
+                            img = self.image_editor.add_logo(img, logo)
+                    if valid_watermark_path:
+                        watermark = self.image_editor.prepare_watermark(valid_watermark_path, watermark_size, watermark_transparency)
+                        if watermark is not None:
+                            img = self.image_editor.add_watermark(img, watermark, watermark_transparency)
+
                     img_bytes = img.tobytes()
-                    try:
-                        for _ in range(frames_per_image):
-                            self._ffmpeg_process.stdin.write(img_bytes)
-                    except BrokenPipeError:
-                        stderr = self._ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
-                        raise RuntimeError(f"FFmpeg pipe broken: {stderr}")
+                    for _ in range(frames_per_image):
+                        self._ffmpeg_process.stdin.write(img_bytes)
 
-                del processed_batch
+                    del img, img_bytes
+
+                except BrokenPipeError:
+                    stderr = self._ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
+                    raise RuntimeError(f"FFmpeg pipe broken: {stderr}")
+                except Exception as e:
+                    logger.warning(f"Skipping image {img_path}: {e}")
         
         finally:
             if self._ffmpeg_process and self._ffmpeg_process.stdin:
