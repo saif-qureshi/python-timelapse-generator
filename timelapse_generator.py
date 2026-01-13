@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Tuple, Optional, List
 import glob
 from moviepy import VideoFileClip, AudioFileClip
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from functools import lru_cache
 import subprocess
 import shlex
@@ -32,6 +32,48 @@ from utils import (
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+def _process_single_image(args):
+    """
+    Process a single image - module-level function for ProcessPoolExecutor.
+    Must be at module level to be picklable.
+    """
+    img_path, width, height, effects_config, overlay_configs, logo_path, watermark_path, watermark_size, watermark_transparency = args
+
+    try:
+        # Import inside function for subprocess isolation
+        import cv2
+        from image_editor import ImageEditor
+
+        img = cv2.imread(img_path)
+        if img is None:
+            return None
+
+        if img.shape[:2] != (height, width):
+            interpolation = cv2.INTER_AREA if img.shape[0] > height else cv2.INTER_LANCZOS4
+            img = cv2.resize(img, (width, height), interpolation=interpolation)
+
+        editor = ImageEditor()
+        img = editor.apply_effects(img, **effects_config)
+
+        if overlay_configs.get('show_date'):
+            img = editor.add_datetime(img, img_path)
+
+        if overlay_configs.get('text'):
+            img = editor.add_text(img, overlay_configs['text'])
+
+        if logo_path:
+            logo = editor.prepare_logo(logo_path)
+            img = editor.add_logo(img, logo)
+
+        if watermark_path:
+            watermark = editor.prepare_watermark(watermark_path, watermark_size, watermark_transparency)
+            img = editor.add_watermark(img, watermark, watermark_transparency)
+
+        return img
+    except Exception as e:
+        return None
 
 
 @dataclass
@@ -147,64 +189,52 @@ class TimelapseGenerator:
     
     def _process_image_batch(self, img_paths: List[str], config: VideoConfig,
                             duration: float, overlay_configs: dict,
-                            effects_config: dict) -> List[np.ndarray]:
-        """Process a batch of images in parallel."""
+                            effects_config: dict,
+                            logo_path: str = None,
+                            watermark_path: str = None,
+                            watermark_size: tuple = None,
+                            watermark_transparency: float = 0.3) -> List[np.ndarray]:
+        """Process a batch of images in parallel using ProcessPoolExecutor."""
         processed = []
-        
+
         total_frames = int(duration * self.fps)
         frames_per_image = max(1, total_frames // len(self.images))
-        
-        def process_single(img_path):
-            img = cv2.imread(img_path)
-            if img is None:
-                return None
-            
-            if img.shape[:2] != (config.height, config.width):
-                interpolation = cv2.INTER_AREA if img.shape[0] > config.height else cv2.INTER_LANCZOS4
-                img = cv2.resize(img, (config.width, config.height), interpolation=interpolation)
-            
-            img = self.image_editor.apply_effects(img, **effects_config)
-            
-            if overlay_configs.get('show_date'):
-                img = self.image_editor.add_datetime(img, img_path)
-            
-            if overlay_configs.get('text'):
-                img = self.image_editor.add_text(img, overlay_configs['text'])
-            
-            if overlay_configs.get('logo') is not None:
-                img = self.image_editor.add_logo(img, overlay_configs['logo'])
-            
-            if overlay_configs.get('watermark') is not None:
-                img = self.image_editor.add_watermark(img, overlay_configs['watermark'],
-                                        overlay_configs['watermark_transparency'])
-            
-            return img
-        
-        with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            futures = {executor.submit(process_single, path): path
-                      for path in img_paths}
 
-            # Timeout for entire batch = per-image timeout * number of images
+        # Prepare args for each image (must be picklable for ProcessPoolExecutor)
+        task_args = [
+            (img_path, config.width, config.height, effects_config, overlay_configs,
+             logo_path, watermark_path, watermark_size, watermark_transparency)
+            for img_path in img_paths
+        ]
+
+        # Use ProcessPoolExecutor - processes CAN be killed unlike threads
+        with ProcessPoolExecutor(max_workers=self.num_workers) as executor:
+            futures = {executor.submit(_process_single_image, args): args[0]
+                      for args in task_args}
+
+            # Timeout for entire batch - 30 seconds per image
             batch_timeout = Config.IMAGE_PROCESS_TIMEOUT * len(img_paths)
 
             try:
                 for future in as_completed(futures, timeout=batch_timeout):
                     img_path = futures[future]
                     try:
-                        result = future.result(timeout=5)  # Short timeout since future is already complete
+                        result = future.result(timeout=5)
                         if result is not None:
                             for _ in range(frames_per_image):
                                 processed.append(result)
                     except Exception as e:
                         logger.warning(f"Error processing image {img_path}: {e}, skipping")
             except TimeoutError:
-                # Batch timed out - cancel remaining futures and continue
+                # Batch timed out - with ProcessPoolExecutor we can actually kill workers
                 not_done = [f for f in futures if not f.done()]
                 for f in not_done:
                     f.cancel()
                     img_path = futures[f]
-                    logger.warning(f"Timeout - cancelled image: {img_path}")
+                    logger.warning(f"Timeout - killed process for image: {img_path}")
                 logger.warning(f"Batch timed out, {len(not_done)} images skipped")
+                # Force shutdown to kill hanging processes
+                executor.shutdown(wait=False, cancel_futures=True)
 
         return processed
     
@@ -264,20 +294,13 @@ class TimelapseGenerator:
         width, height, bitrate, crf = self.QUALITY_PRESETS[quality]
         config = VideoConfig(width, height, self.fps, quality, bitrate, crf=crf)
         
-        logo = None
-        if logo_path and os.path.exists(logo_path):
-            logo = self.image_editor.prepare_logo(logo_path)
-        
-        watermark = None
-        if watermark_path and os.path.exists(watermark_path):
-            watermark = self.image_editor.prepare_watermark(watermark_path, watermark_size, watermark_transparency)
-        
+        # Validate paths exist (don't prepare objects - will be done in subprocesses)
+        valid_logo_path = logo_path if logo_path and os.path.exists(logo_path) else None
+        valid_watermark_path = watermark_path if watermark_path and os.path.exists(watermark_path) else None
+
         overlay_configs = {
             'show_date': show_date,
             'text': text,
-            'logo': logo,
-            'watermark': watermark,
-            'watermark_transparency': watermark_transparency
         }
         
         effects_config = {
@@ -332,8 +355,13 @@ class TimelapseGenerator:
                     stderr = self._ffmpeg_process.stderr.read().decode('utf-8', errors='ignore')
                     raise RuntimeError(f"FFmpeg process died: {stderr}")
                 
-                processed_batch = self._process_image_batch(batch_paths, config, duration,
-                                                          overlay_configs, effects_config)
+                processed_batch = self._process_image_batch(
+                    batch_paths, config, duration, overlay_configs, effects_config,
+                    logo_path=valid_logo_path,
+                    watermark_path=valid_watermark_path,
+                    watermark_size=watermark_size,
+                    watermark_transparency=watermark_transparency
+                )
                 
                 for img in processed_batch:
                     try:
