@@ -49,6 +49,7 @@ class Config:
     
     FFMPEG_TIMEOUT = 3600
     FFMPEG_BUFFER_SIZE = 10 * 1024 * 1024
+    IMAGE_PROCESS_TIMEOUT = 30  # seconds per image
     
     MIN_AVAILABLE_MEMORY_MB = 500
     MIN_AVAILABLE_DISK_GB = 1

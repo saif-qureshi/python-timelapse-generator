@@ -181,15 +181,21 @@ class TimelapseGenerator:
             return img
         
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
-            futures = {executor.submit(process_single, path): path 
+            futures = {executor.submit(process_single, path): path
                       for path in img_paths}
-            
+
             for future in as_completed(futures):
-                result = future.result()
-                if result is not None:
-                    for _ in range(frames_per_image):
-                        processed.append(result)
-        
+                img_path = futures[future]
+                try:
+                    result = future.result(timeout=Config.IMAGE_PROCESS_TIMEOUT)
+                    if result is not None:
+                        for _ in range(frames_per_image):
+                            processed.append(result)
+                except TimeoutError:
+                    logger.warning(f"Timeout processing image: {img_path}, skipping")
+                except Exception as e:
+                    logger.warning(f"Error processing image {img_path}: {e}, skipping")
+
         return processed
     
     def create_video_ffmpeg(self, quality: str = '720', duration: float = 30.0,
