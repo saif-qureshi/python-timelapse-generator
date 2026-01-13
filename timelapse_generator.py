@@ -184,17 +184,27 @@ class TimelapseGenerator:
             futures = {executor.submit(process_single, path): path
                       for path in img_paths}
 
-            for future in as_completed(futures):
-                img_path = futures[future]
-                try:
-                    result = future.result(timeout=Config.IMAGE_PROCESS_TIMEOUT)
-                    if result is not None:
-                        for _ in range(frames_per_image):
-                            processed.append(result)
-                except TimeoutError:
-                    logger.warning(f"Timeout processing image: {img_path}, skipping")
-                except Exception as e:
-                    logger.warning(f"Error processing image {img_path}: {e}, skipping")
+            # Timeout for entire batch = per-image timeout * number of images
+            batch_timeout = Config.IMAGE_PROCESS_TIMEOUT * len(img_paths)
+
+            try:
+                for future in as_completed(futures, timeout=batch_timeout):
+                    img_path = futures[future]
+                    try:
+                        result = future.result(timeout=5)  # Short timeout since future is already complete
+                        if result is not None:
+                            for _ in range(frames_per_image):
+                                processed.append(result)
+                    except Exception as e:
+                        logger.warning(f"Error processing image {img_path}: {e}, skipping")
+            except TimeoutError:
+                # Batch timed out - cancel remaining futures and continue
+                not_done = [f for f in futures if not f.done()]
+                for f in not_done:
+                    f.cancel()
+                    img_path = futures[f]
+                    logger.warning(f"Timeout - cancelled image: {img_path}")
+                logger.warning(f"Batch timed out, {len(not_done)} images skipped")
 
         return processed
     
