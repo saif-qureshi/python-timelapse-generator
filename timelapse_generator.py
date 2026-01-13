@@ -358,7 +358,19 @@ class TimelapseGenerator:
         
         logger.info(f"Video created: {self.temp_video_path}")
         self._ffmpeg_process = None
-    
+
+    def finalize(self):
+        """
+        Finalize video by renaming temp file to final output.
+        Call this when not adding music.
+        """
+        if self.temp_video_path.exists():
+            import shutil
+            shutil.move(str(self.temp_video_path), str(self.output_path))
+            logger.info(f"Final video saved: {self.output_path}")
+        else:
+            raise RuntimeError("Temp video file not found. Create video first.")
+
     def add_music(self, music_path: str, loop: bool = True, volume: float = 1.0):
         """
         Add music using FFmpeg directly with proper validation.
