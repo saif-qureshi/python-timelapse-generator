@@ -91,14 +91,12 @@ def main():
             
             if args.music:
                 generator.add_music(
-                    args.music, 
+                    args.music,
                     loop=True,
                     volume=1.0
                 )
             else:
-                if generator.temp_video_path.exists():
-                    os.rename(generator.temp_video_path, generator.output_path)
-                    logger.info(f"Final video saved: {generator.output_path}")
+                generator.finalize()
                 
     except (ValidationError, SecurityError) as e:
         logger.error(f"Validation error: {e}")
