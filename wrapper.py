@@ -35,7 +35,6 @@ def main():
     parser.add_argument('--start-hour', type=int, default=8, help='Start hour (0-23)')
     parser.add_argument('--end-hour', type=int, default=17, help='End hour (0-23)')
 
-    parser.add_argument('--fps', type=int, default=5)
     parser.add_argument('--quality', default='HD')
     parser.add_argument('--duration', type=float, default=30, help='Video duration in seconds')
     parser.add_argument('--batch-size', type=int, default=100)
@@ -115,7 +114,6 @@ def _process_video(args, s3, filtered_photos):
     """Generate timelapse video."""
     generator = TimelapseGenerator(
         output_path=args.output_path,
-        fps=args.fps,
         num_workers=args.workers,
         s3_client=s3,
         photo_list=filtered_photos,

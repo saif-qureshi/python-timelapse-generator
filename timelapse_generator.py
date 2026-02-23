@@ -84,7 +84,7 @@ class TimelapseGenerator:
             except Exception:
                 pass
 
-    def __init__(self, output_path: str, fps: int = 30,
+    def __init__(self, output_path: str,
                  num_workers: int = None,
                  s3_client=None, photo_list: list = None):
         """
@@ -104,7 +104,7 @@ class TimelapseGenerator:
             else:
                 raise ValidationError(f"Output directory does not exist: {output_path_obj.parent}")
 
-            self.fps = validate_numeric_range(fps, 1, 120, "FPS")
+            self.fps = 30  # Default, overridden by create_video_ffmpeg based on duration
 
         except (ValidationError, SecurityError) as e:
             logger.error(f"Initialization failed: {e}")
@@ -261,6 +261,11 @@ class TimelapseGenerator:
 
         codec = 'h264_nvenc' if use_gpu else 'libx264'
 
+        # Calculate FPS from actual image count to fit all images in requested duration
+        actual_fps = max(1, round(len(self.images) / duration))
+        self.fps = actual_fps
+        logger.info(f"Adjusted FPS to {actual_fps} to fit {len(self.images)} images in {duration}s")
+
         ffmpeg_cmd = ['ffmpeg', '-y']
         ffmpeg_cmd.extend(['-f', 'rawvideo'])
         ffmpeg_cmd.extend(['-vcodec', 'rawvideo'])
@@ -300,9 +305,7 @@ class TimelapseGenerator:
         )
         stderr_thread.start()
 
-        # Calculate frames per image for duration control
-        total_frames = int(duration * self.fps)
-        frames_per_image = max(1, total_frames // len(self.images))
+        frames_per_image = 1
 
         # Prefetch images in background thread
         image_queue = queue.Queue(maxsize=10)
@@ -364,8 +367,9 @@ class TimelapseGenerator:
                     del img, img_bytes
 
                 except BrokenPipeError:
+                    logger.info("FFmpeg closed pipe (enough frames received)")
                     stop_event.set()
-                    raise RuntimeError("FFmpeg pipe broken - process may have exited")
+                    break
                 except Exception as e:
                     logger.warning(f"Skipping image {photo_info.get('key', '?')}: {e}")
 
