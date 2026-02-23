@@ -19,6 +19,7 @@ from typing import Tuple, Optional, List
 from moviepy import VideoFileClip, AudioFileClip
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
+import math
 import subprocess
 import shlex
 from dataclasses import dataclass
@@ -262,7 +263,7 @@ class TimelapseGenerator:
         codec = 'h264_nvenc' if use_gpu else 'libx264'
 
         # Calculate FPS from actual image count to fit all images in requested duration
-        actual_fps = max(1, round(len(self.images) / duration))
+        actual_fps = max(1, math.ceil(len(self.images) / duration))
         self.fps = actual_fps
         logger.info(f"Adjusted FPS to {actual_fps} to fit {len(self.images)} images in {duration}s")
 
@@ -385,7 +386,10 @@ class TimelapseGenerator:
             prefetch_thread.join(timeout=10)
 
             if self._ffmpeg_process and self._ffmpeg_process.stdin:
-                self._ffmpeg_process.stdin.close()
+                try:
+                    self._ffmpeg_process.stdin.close()
+                except BrokenPipeError:
+                    pass
 
             if self._ffmpeg_process:
                 try:
