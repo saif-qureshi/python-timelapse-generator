@@ -4,15 +4,14 @@ S3 Client Module
 Handles all S3 interactions for the timelapse generator.
 """
 import os
-import time
-import random
 import logging
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
 
 import boto3
-from botocore.exceptions import ClientError, EndpointConnectionError, ReadTimeoutError, ConnectTimeoutError
+from botocore.config import Config as BotoConfig
+from botocore.exceptions import ClientError
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +24,13 @@ class S3Client:
                  endpoint_url: str = None):
         self.bucket = bucket
 
-        kwargs = {'region_name': region}
+        boto_config = BotoConfig(
+            retries={'mode': 'adaptive', 'max_attempts': 5},
+            connect_timeout=10,
+            read_timeout=60,
+        )
+
+        kwargs = {'region_name': region, 'config': boto_config}
         if access_key and secret_key:
             kwargs['aws_access_key_id'] = access_key
             kwargs['aws_secret_access_key'] = secret_key
@@ -88,35 +93,14 @@ class S3Client:
         logger.info(f"Listed {len(photos)} photos under prefix '{prefix}'")
         return photos
 
-    _TRANSIENT_ERRORS = (EndpointConnectionError, ReadTimeoutError, ConnectTimeoutError, ConnectionError, OSError)
-    _NON_TRANSIENT_S3_CODES = frozenset({'NoSuchKey', 'AccessDenied', 'InvalidObjectState', 'NoSuchBucket'})
-
-    def download_bytes(self, key: str, max_retries: int = 3) -> bytes:
-        """Download an S3 object entirely into memory with retry and backoff."""
-        last_error = None
-        for attempt in range(1, max_retries + 1):
-            try:
-                response = self._client.get_object(Bucket=self.bucket, Key=key)
-                body = response['Body']
-                try:
-                    return body.read()
-                finally:
-                    body.close()
-            except ClientError as e:
-                code = e.response.get('Error', {}).get('Code', '')
-                if code in self._NON_TRANSIENT_S3_CODES:
-                    raise  # Don't retry permanent errors
-                last_error = e
-            except self._TRANSIENT_ERRORS as e:
-                last_error = e
-            except Exception:
-                raise  # Unknown errors should not be retried
-            if attempt < max_retries:
-                delay = (2 ** (attempt - 1)) + random.uniform(0, 1)
-                logger.warning(f"S3 download failed for '{key}' (attempt {attempt}/{max_retries}): {last_error}. "
-                               f"Retrying in {delay:.1f}s...")
-                time.sleep(delay)
-        raise RuntimeError(f"S3 download failed for '{key}' after {max_retries} attempts: {last_error}")
+    def download_bytes(self, key: str) -> bytes:
+        """Download an S3 object entirely into memory."""
+        response = self._client.get_object(Bucket=self.bucket, Key=key)
+        body = response['Body']
+        try:
+            return body.read()
+        finally:
+            body.close()
 
     def upload_file(self, local_path: str, s3_key: str, content_type: str = None):
         """Upload a local file to S3."""
