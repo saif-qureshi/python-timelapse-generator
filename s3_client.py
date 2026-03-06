@@ -28,6 +28,7 @@ class S3Client:
             retries={'mode': 'adaptive', 'max_attempts': 5},
             connect_timeout=10,
             read_timeout=60,
+            use_dualstack_endpoint=True,
         )
 
         kwargs = {'region_name': region, 'config': boto_config}
