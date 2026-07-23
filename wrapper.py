@@ -12,7 +12,7 @@ import tempfile
 import shutil
 import logging
 
-from s3_client import S3Client, filter_photos_by_time
+from s3_client import S3Client, filter_photos_by_time, to_local
 from timelapse_generator import TimelapseGenerator
 from photo_exporter import PhotoExporter
 
@@ -32,8 +32,9 @@ def main():
 
     parser.add_argument('--start-date', required=True, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date', required=True, help='End date (YYYY-MM-DD)')
-    parser.add_argument('--start-hour', type=int, default=8, help='Start hour (0-23)')
-    parser.add_argument('--end-hour', type=int, default=17, help='End hour (0-23)')
+    parser.add_argument('--start-hour', type=int, default=8, help='Start hour (0-23), camera local time')
+    parser.add_argument('--end-hour', type=int, default=17, help='End hour (0-23), camera local time')
+    parser.add_argument('--timezone', default='UTC', help='Camera timezone the date/hour window is expressed in')
 
     parser.add_argument('--quality', default='HD')
     parser.add_argument('--duration', type=float, default=30, help='Video duration in seconds')
@@ -71,17 +72,24 @@ def main():
         logger.error(f"No photos found under prefix: {args.s3_prefix}")
         sys.exit(1)
 
-    logger.info(f"Filtering photos from {args.start_date} {args.start_hour}:00 to {args.end_date} {args.end_hour}:59")
+    logger.info(f"Filtering photos from {args.start_date} {args.start_hour}:00 to {args.end_date} {args.end_hour}:59 ({args.timezone})")
     filtered_photos = filter_photos_by_time(
         all_photos,
         args.start_date,
         args.end_date,
         args.start_hour,
-        args.end_hour
+        args.end_hour,
+        args.timezone
     )
 
     if not filtered_photos:
-        logger.error("No photos found in the specified date/time range")
+        available = sorted({to_local(p['timestamp'], args.timezone).hour
+                            for p in all_photos if p.get('timestamp')})
+        logger.error(
+            f"No photos found between {args.start_date} and {args.end_date} "
+            f"within hours {args.start_hour}-{args.end_hour} ({args.timezone}). "
+            f"This camera has photos at these hours: {available}"
+        )
         sys.exit(1)
 
     logger.info(f"Found {len(filtered_photos)} photos matching criteria")

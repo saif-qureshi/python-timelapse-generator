@@ -8,6 +8,7 @@ import logging
 from pathlib import Path
 from typing import List, Optional
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import boto3
 from botocore.config import Config as BotoConfig
@@ -123,17 +124,33 @@ class S3Client:
             return False
 
 
+def to_local(ts: datetime, timezone: str) -> datetime:
+    """Convert a naive UTC timestamp to naive wall-clock time in `timezone`."""
+    try:
+        tz = ZoneInfo(timezone)
+    except Exception:
+        logger.warning(f"Unknown timezone '{timezone}', treating timestamps as UTC")
+        tz = ZoneInfo('UTC')
+
+    return ts.replace(tzinfo=ZoneInfo('UTC')).astimezone(tz).replace(tzinfo=None)
+
+
 def filter_photos_by_time(photos: List[dict], start_date: str, end_date: str,
-                          start_hour: int, end_hour: int) -> List[dict]:
+                          start_hour: int, end_hour: int,
+                          timezone: str = 'UTC') -> List[dict]:
     """
     Filter photo list by date range and hour window.
 
+    Photo timestamps are stored in UTC, but the requested window is expressed in
+    the camera's local time, so each timestamp is converted before comparison.
+
     Args:
         photos: List of photo dicts from S3Client.list_photos()
-        start_date: Start date string (YYYY-MM-DD)
-        end_date: End date string (YYYY-MM-DD)
-        start_hour: Start hour (0-23)
-        end_hour: End hour (0-23)
+        start_date: Start date string (YYYY-MM-DD), local
+        end_date: End date string (YYYY-MM-DD), local
+        start_hour: Start hour (0-23), local
+        end_hour: End hour (0-23), local
+        timezone: Camera timezone the window is expressed in
     """
     start_dt = datetime.strptime(start_date, "%Y-%m-%d").replace(
         hour=start_hour, minute=0, second=0
@@ -147,9 +164,10 @@ def filter_photos_by_time(photos: List[dict], start_date: str, end_date: str,
         ts = photo.get('timestamp')
         if ts is None:
             continue
-        if start_dt <= ts <= end_dt and start_hour <= ts.hour <= end_hour:
+        local = to_local(ts, timezone)
+        if start_dt <= local <= end_dt and start_hour <= local.hour <= end_hour:
             filtered.append(photo)
 
     logger.info(f"Filtered {len(filtered)} photos from {len(photos)} total "
-                f"({start_date} {start_hour}:00 to {end_date} {end_hour}:59)")
+                f"({start_date} {start_hour}:00 to {end_date} {end_hour}:59 {timezone})")
     return filtered
